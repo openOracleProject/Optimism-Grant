@@ -9,6 +9,23 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ISignatureTransfer} from "./interfaces/ISignatureTransfer.sol";
 import {Errors} from "./libraries/Errors.sol";
 
+interface IOPGrantFaucet {
+    function feeRebateEligible() external view returns (bool);
+    function openSwapFeeRebate(
+        address swapper,
+        address sellToken,
+        uint256 sellAmt,
+        uint256 settlementTime,
+        bool timeType,
+        uint256 startingFee,
+        uint256 maxFee,
+        uint256 initLiquidity,
+        uint256 toleranceRange,
+        uint256 swapFee,
+        uint256 protocolFee
+    ) external;
+}
+
 /**
  * @title openSwap
  * @notice A user proposes a swap, someone matches it, and openOracle determines the execution price.
@@ -32,12 +49,12 @@ import {Errors} from "./libraries/Errors.sol";
 contract openSwapV2Optimism is ReentrancyGuard {
     IOpenOracle2 public immutable oracle;
     address public immutable feeReceiverImpl;
-    address public immutable rebateDistributor;
+    IOPGrantFaucet public immutable rebateDistributor;
 
     constructor(address oracle_, address rebateDistributor_) {
         oracle = IOpenOracle2(oracle_);
         feeReceiverImpl = address(new oracleFeeReceiver());
-        rebateDistributor = rebateDistributor_;
+        rebateDistributor = IOPGrantFaucet(rebateDistributor_);
     }
 
     mapping(uint256 => bytes32) public swaps;
