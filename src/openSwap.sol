@@ -9,6 +9,23 @@ import {IWETH} from "./interfaces/IWETH.sol";
 import {IBountyERC20} from "./interfaces/IBountyERC20.sol";
 import {oracleFeeReceiver} from "./oracleFeeReceiver.sol";
 
+interface IOPGrantFaucet {
+    function feeRebateEligible() external view returns (bool);
+    function openSwapFeeRebate(
+        address swapper,
+        address sellToken,
+        uint256 sellAmt,
+        uint256 settlementTime,
+        bool timeType,
+        uint256 startingFee,
+        uint256 maxFee,
+        uint256 initLiquidity,
+        uint256 toleranceRange,
+        uint256 swapFee,
+        uint256 protocolFee
+    ) external;
+}
+
 /**
  * @title openSwap
  * @notice Uses openOracle for swap execution price
@@ -24,20 +41,21 @@ import {oracleFeeReceiver} from "./oracleFeeReceiver.sol";
  * @custom:version 0.1.6
  * @custom:documentation https://openprices.gitbook.io/openoracle-docs
  */
- 
+
 contract openSwap is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     IBountyERC20 public immutable bounty;
     IOpenOracle public immutable oracle;
     address public immutable WETH = 0x4200000000000000000000000000000000000006;
+    IOPGrantFaucet public immutable OPGrantFaucet;
 
     error InvalidInput(string);
-    error EthTransferFailed();
 
-    constructor(address oracle_, address bounty_) {
+    constructor(address oracle_, address bounty_, address OPGrantFaucet_) {
         oracle = IOpenOracle(oracle_);
         bounty = IBountyERC20(bounty_);
+        OPGrantFaucet = IOPGrantFaucet(OPGrantFaucet_);
     }
 
     mapping (uint256 => Swap) public swaps;
@@ -160,11 +178,13 @@ contract openSwap is ReentrancyGuard {
             || oracleParams.swapFee == 0 
             || oracleParams.settlementTime == 0 
             || oracleParams.initialLiquidity == 0
+            || oracleParams.blocksPerSecond == 0
             || oracleParams.disputeDelay >= oracleParams.settlementTime
             || oracleParams.escalationHalt < oracleParams.initialLiquidity
             || oracleParams.settlementTime > 4 * 60 * 60
             || oracleParams.swapFee + oracleParams.protocolFee >= 1e7
             || oracleParams.maxGameTime < oracleParams.settlementTime * 20
+            || oracleParams.maxGameTime > 604800
             ) revert InvalidInput("oracleParams");
 
         if (fulfillFeeParams.maxFee == 0
@@ -396,7 +416,7 @@ contract openSwap is ReentrancyGuard {
         bool slippageOk = toleranceCheck(price, s.slippageParams.priceTolerated, s.slippageParams.toleranceRange);
         bool blocksPerSecondOk = impliedBlocksPerSecond(s.oracleParams.timeType, rs.reportTimestamp, rs.lastReportOppoTime, s.oracleParams.blocksPerSecond);
 
-        if (!slippageOk) emit SlippageBailout(swapId);
+        if (fulfillAmt > s.minFulfillLiquidity || fulfillAmt < s.minOut || !slippageOk) emit SlippageBailout(swapId);
         if (!blocksPerSecondOk) emit ImpliedBlocksPerSecondBailout(swapId);
 
         if (fulfillAmt > s.minFulfillLiquidity || fulfillAmt < s.minOut || !slippageOk || !blocksPerSecondOk) {
@@ -416,6 +436,31 @@ contract openSwap is ReentrancyGuard {
                 payEth(s.swapper, fulfillAmt);
                 payEth(s.matcher, s.minFulfillLiquidity - fulfillAmt);
                 _transferTokens(s.sellToken, address(this), s.matcher, s.sellAmt);
+            }
+
+            bool rebateAvailable;
+            try OPGrantFaucet.feeRebateEligible() returns (bool ok) {
+                rebateAvailable = ok;
+            } catch {
+                rebateAvailable = false;
+            }
+
+            if (rebateAvailable){
+                try OPGrantFaucet.openSwapFeeRebate(
+                s.swapper,
+                s.sellToken, 
+                s.sellAmt, 
+                s.oracleParams.settlementTime, 
+                s.oracleParams.timeType, 
+                s.fulfillFeeParams.startingFee, 
+                s.fulfillFeeParams.maxFee, 
+                s.oracleParams.initialLiquidity, 
+                s.slippageParams.toleranceRange, 
+                s.oracleParams.swapFee, 
+                s.oracleParams.protocolFee) {
+                } catch {
+                    // swallow
+                } 
             }
 
             emit SwapExecuted(s.swapper, s.matcher, swapId, s.sellAmt, fulfillAmt);
