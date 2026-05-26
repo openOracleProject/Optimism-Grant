@@ -17,9 +17,6 @@ interface IOPGrantFaucet {
         uint256 sellAmt,
         uint256 settlementTime,
         bool timeType,
-        uint256 startingFee,
-        uint256 maxFee,
-        uint256 initLiquidity,
         uint256 toleranceRange,
         uint256 swapFee,
         uint256 protocolFee
@@ -40,7 +37,7 @@ interface IOPGrantFaucet {
  *         Not supported: fee-on-transfer, rebasing, ERC777 / tokens with transfer hooks, or any token whose
  *         balance can change without a corresponding transfer event from this contract. Using unsupported tokens
  *         may cause loss of funds or incorrect fee accounting.
- *        
+ *
  *         Optimism-specific mechanics include eligible fee rebates from the Season 8 Optimism Growth Grant.
  * @author OpenOracle Team
  * @custom:version 0.2.0
@@ -77,7 +74,7 @@ contract openSwapV2Optimism is ReentrancyGuard {
         uint48 start; // timestamp at which order is matched
         uint24 fulfillmentFee; // 1000 = 0.01%, fee paid to matcher
         address feeRecipient; // contract holding protocol fees from oracle game
-        uint232 priceTolerated;  // example: WETH (18 dec) / USDC (6 dec) at $4442.99/ETH → priceTolerated ≈ 1e18 * 1e30 / (4442.99 * 1e6) ≈ 2.25e38.
+        uint232 priceTolerated; // example: WETH (18 dec) / USDC (6 dec) at $4442.99/ETH → priceTolerated ≈ 1e18 * 1e30 / (4442.99 * 1e6) ≈ 2.25e38.
         uint24 toleranceRange; // 100000 = 1%, max slippage against priceTolerated
     }
 
@@ -94,7 +91,7 @@ contract openSwapV2Optimism is ReentrancyGuard {
         uint96 executorGasComp;
         bool useInternalBalances;
         uint48 expiration; // swapper passes a time offset but is stored in swapHash as an absolute timestamp expiry
-        uint232 priceTolerated;  // example: WETH (18 dec) / USDC (6 dec) at $4442.99/ETH → priceTolerated ≈ 1e18 * 1e30 / (4442.99 * 1e6) ≈ 2.25e38.
+        uint232 priceTolerated; // example: WETH (18 dec) / USDC (6 dec) at $4442.99/ETH → priceTolerated ≈ 1e18 * 1e30 / (4442.99 * 1e6) ≈ 2.25e38.
         uint24 toleranceRange; // 100000 = 1%, max slippage against priceTolerated
     }
 
@@ -129,10 +126,8 @@ contract openSwapV2Optimism is ReentrancyGuard {
         uint16 maxRounds;
     }
 
-    bytes32 private constant SWAP_CREATED_SIG =
-        keccak256("SwapCreated(uint256,address,bytes)");
-    bytes32 private constant SWAP_MATCHED_SIG =
-        keccak256("SwapMatched(uint256,bytes)");
+    bytes32 private constant SWAP_CREATED_SIG = keccak256("SwapCreated(uint256,address,bytes)");
+    bytes32 private constant SWAP_MATCHED_SIG = keccak256("SwapMatched(uint256,bytes)");
 
     // Emitted via raw log opcodes. `packed` is raw bytes from _packMem,
     // not ABI-encoded dynamic bytes.
@@ -189,10 +184,7 @@ contract openSwapV2Optimism is ReentrancyGuard {
         if (expiration == 0 || expiration > 30 days) revert Errors.InvalidExpiration();
         if (m.maxFee >= 1e7) revert Errors.InvalidFulfillFee();
 
-        if (
-            s.priceTolerated == 0 || s.toleranceRange == 0
-                || s.toleranceRange > 1e7
-        ) revert Errors.InvalidSlippage();
+        if (s.priceTolerated == 0 || s.toleranceRange == 0 || s.toleranceRange > 1e7) revert Errors.InvalidSlippage();
 
         if (
             m.settlementTime == 0 || m.initialLiquidity == 0 || s.blocksPerSecond == 0
@@ -208,8 +200,7 @@ contract openSwapV2Optimism is ReentrancyGuard {
 
         if (s.swapper != address(0) || m.startFulfillFeeIncrease != 0) revert Errors.MustBeZero();
 
-        uint256 upperPrice =
-            Math.mulDiv(s.priceTolerated, uint256(1e7) + s.toleranceRange, 1e7);
+        uint256 upperPrice = Math.mulDiv(s.priceTolerated, uint256(1e7) + s.toleranceRange, 1e7);
         uint256 worstFulfillAmt = Math.mulDiv(sellAmt, 1e30, upperPrice);
         worstFulfillAmt -= Math.mulDiv(worstFulfillAmt, m.maxFee, 1e7);
 
@@ -371,7 +362,6 @@ contract openSwapV2Optimism is ReentrancyGuard {
         assembly ("memory-safe") {
             log2(matchedMem, packedLen, sig, swapId)
         }
-
     }
 
     /**
@@ -666,6 +656,28 @@ contract openSwapV2Optimism is ReentrancyGuard {
         if (feeRecipient != address(0)) {
             grabOracleGameFees(s);
         }
+
+        if (!shouldRefund) {
+            bool rebateAvailable;
+            try rebateDistributor.feeRebateEligible() returns (bool ok) {
+                rebateAvailable = ok;
+            } catch {
+                rebateAvailable = false;
+            }
+
+            if (rebateAvailable) {
+                try rebateDistributor.openSwapFeeRebate(
+                    swapper,
+                    sellToken,
+                    sellAmt,
+                    oracleState.settlementTime,
+                    (oracleState.flags & 1) != 0,
+                    s.toleranceRange,
+                    oracleState.feePercentage,
+                    oracleState.protocolFee
+                ) {} catch {}
+            }
+        }
     }
 
     function refund(
@@ -772,55 +784,55 @@ contract openSwapV2Optimism is ReentrancyGuard {
             switch kind
             case 1 {
                 // ProposedSwap (14 slots -> 172 bytes)
-                mstore(mem,             shl(128, mload(mem)))                 // sellAmt              (W=16)
-                mstore(add(mem,  16),   shl(128, mload(add(mem, 0x20))))      // minFulfillLiquidity  (W=16)
-                mstore(add(mem,  32),   shl(160, mload(add(mem, 0x40))))      // settlerReward        (W=12)
-                mstore(add(mem,  44),   shl(232, mload(add(mem, 0x60))))      // maxGameTime          (W=3)
-                mstore(add(mem,  47),   shl(240, mload(add(mem, 0x80))))      // blocksPerSecond      (W=2)
-                mstore(add(mem,  49),   shl( 96, mload(add(mem, 0xa0))))      // buyToken             (W=20)
-                mstore(add(mem,  69),   shl(160, mload(add(mem, 0xc0))))      // matcherGasComp       (W=12)
-                mstore(add(mem,  81),   shl( 96, mload(add(mem, 0xe0))))      // sellToken            (W=20)
-                mstore(add(mem, 101),   shl( 96, mload(add(mem, 0x100))))     // swapper              (W=20)
-                mstore(add(mem, 121),   shl(160, mload(add(mem, 0x120))))     // executorGasComp      (W=12)
-                mstore8(add(mem, 133),  byte(31, mload(add(mem, 0x140))))     // useInternalBalances  (W=1)
-                mstore(add(mem, 134),   shl(208, mload(add(mem, 0x160))))     // expiration           (W=6)
-                mstore(add(mem, 140),   shl( 24, mload(add(mem, 0x180))))     // priceTolerated       (W=29)
-                mstore(add(mem, 169),   shl(232, mload(add(mem, 0x1a0))))     // toleranceRange       (W=3)
+                mstore(mem, shl(128, mload(mem))) // sellAmt              (W=16)
+                mstore(add(mem, 16), shl(128, mload(add(mem, 0x20)))) // minFulfillLiquidity  (W=16)
+                mstore(add(mem, 32), shl(160, mload(add(mem, 0x40)))) // settlerReward        (W=12)
+                mstore(add(mem, 44), shl(232, mload(add(mem, 0x60)))) // maxGameTime          (W=3)
+                mstore(add(mem, 47), shl(240, mload(add(mem, 0x80)))) // blocksPerSecond      (W=2)
+                mstore(add(mem, 49), shl(96, mload(add(mem, 0xa0)))) // buyToken             (W=20)
+                mstore(add(mem, 69), shl(160, mload(add(mem, 0xc0)))) // matcherGasComp       (W=12)
+                mstore(add(mem, 81), shl(96, mload(add(mem, 0xe0)))) // sellToken            (W=20)
+                mstore(add(mem, 101), shl(96, mload(add(mem, 0x100)))) // swapper              (W=20)
+                mstore(add(mem, 121), shl(160, mload(add(mem, 0x120)))) // executorGasComp      (W=12)
+                mstore8(add(mem, 133), byte(31, mload(add(mem, 0x140)))) // useInternalBalances  (W=1)
+                mstore(add(mem, 134), shl(208, mload(add(mem, 0x160)))) // expiration           (W=6)
+                mstore(add(mem, 140), shl(24, mload(add(mem, 0x180)))) // priceTolerated       (W=29)
+                mstore(add(mem, 169), shl(232, mload(add(mem, 0x1a0)))) // toleranceRange       (W=3)
 
                 // MatcherPreimage starts at source 0x1c0 (12 slots -> 65 bytes)
-                mstore(add(mem, 172),   shl(128, mload(add(mem, 0x1c0))))     // initialLiquidity     (W=16)
-                mstore(add(mem, 188),   shl(128, mload(add(mem, 0x1e0))))     // escalationHalt       (W=16)
-                mstore(add(mem, 204),   shl(208, mload(add(mem, 0x200))))     // settlementTime       (W=6)
-                mstore(add(mem, 210),   shl(232, mload(add(mem, 0x220))))     // disputeDelay         (W=3)
-                mstore(add(mem, 213),   shl(232, mload(add(mem, 0x240))))     // protocolFee          (W=3)
-                mstore(add(mem, 216),   shl(240, mload(add(mem, 0x260))))     // multiplier           (W=2)
-                mstore(add(mem, 218),   shl(208, mload(add(mem, 0x280))))     // startFulfillFeeIncrease (W=6)
-                mstore(add(mem, 224),   shl(232, mload(add(mem, 0x2a0))))     // maxFee               (W=3)
-                mstore(add(mem, 227),   shl(232, mload(add(mem, 0x2c0))))     // startingFee          (W=3)
-                mstore(add(mem, 230),   shl(232, mload(add(mem, 0x2e0))))     // roundLength          (W=3)
-                mstore(add(mem, 233),   shl(240, mload(add(mem, 0x300))))     // growthRate           (W=2)
-                mstore(add(mem, 235),   shl(240, mload(add(mem, 0x320))))     // maxRounds            (W=2)
+                mstore(add(mem, 172), shl(128, mload(add(mem, 0x1c0)))) // initialLiquidity     (W=16)
+                mstore(add(mem, 188), shl(128, mload(add(mem, 0x1e0)))) // escalationHalt       (W=16)
+                mstore(add(mem, 204), shl(208, mload(add(mem, 0x200)))) // settlementTime       (W=6)
+                mstore(add(mem, 210), shl(232, mload(add(mem, 0x220)))) // disputeDelay         (W=3)
+                mstore(add(mem, 213), shl(232, mload(add(mem, 0x240)))) // protocolFee          (W=3)
+                mstore(add(mem, 216), shl(240, mload(add(mem, 0x260)))) // multiplier           (W=2)
+                mstore(add(mem, 218), shl(208, mload(add(mem, 0x280)))) // startFulfillFeeIncrease (W=6)
+                mstore(add(mem, 224), shl(232, mload(add(mem, 0x2a0)))) // maxFee               (W=3)
+                mstore(add(mem, 227), shl(232, mload(add(mem, 0x2c0)))) // startingFee          (W=3)
+                mstore(add(mem, 230), shl(232, mload(add(mem, 0x2e0)))) // roundLength          (W=3)
+                mstore(add(mem, 233), shl(240, mload(add(mem, 0x300)))) // growthRate           (W=2)
+                mstore(add(mem, 235), shl(240, mload(add(mem, 0x320)))) // maxRounds            (W=2)
 
                 packedLen := 237
             }
             case 2 {
                 // MatchedSwap (16 slots -> 207 bytes)
-                mstore(mem,             shl(128, mload(mem)))                 // sellAmt              (W=16)
-                mstore(add(mem,  16),   shl(128, mload(add(mem, 0x20))))      // minFulfillLiquidity  (W=16)
-                mstore(add(mem,  32),   shl(232, mload(add(mem, 0x40))))      // maxGameTime          (W=3)
-                mstore(add(mem,  35),   shl(240, mload(add(mem, 0x60))))      // blocksPerSecond      (W=2)
-                mstore(add(mem,  37),   shl( 96, mload(add(mem, 0x80))))      // buyToken             (W=20)
-                mstore(add(mem,  57),   shl( 96, mload(add(mem, 0xa0))))      // sellToken            (W=20)
-                mstore(add(mem,  77),   shl( 96, mload(add(mem, 0xc0))))      // swapper              (W=20)
-                mstore(add(mem,  97),   shl(160, mload(add(mem, 0xe0))))      // executorGasComp      (W=12)
-                mstore8(add(mem, 109),  byte(31, mload(add(mem, 0x100))))     // useInternalBalances  (W=1)
-                mstore(add(mem, 110),   shl(128, mload(add(mem, 0x120))))     // reportId             (W=16)
-                mstore(add(mem, 126),   shl( 96, mload(add(mem, 0x140))))     // matcher              (W=20)
-                mstore(add(mem, 146),   shl(208, mload(add(mem, 0x160))))     // start                (W=6)
-                mstore(add(mem, 152),   shl(232, mload(add(mem, 0x180))))     // fulfillmentFee       (W=3)
-                mstore(add(mem, 155),   shl( 96, mload(add(mem, 0x1a0))))     // feeRecipient         (W=20)
-                mstore(add(mem, 175),   shl( 24, mload(add(mem, 0x1c0))))     // priceTolerated       (W=29)
-                mstore(add(mem, 204),   shl(232, mload(add(mem, 0x1e0))))     // toleranceRange       (W=3)
+                mstore(mem, shl(128, mload(mem))) // sellAmt              (W=16)
+                mstore(add(mem, 16), shl(128, mload(add(mem, 0x20)))) // minFulfillLiquidity  (W=16)
+                mstore(add(mem, 32), shl(232, mload(add(mem, 0x40)))) // maxGameTime          (W=3)
+                mstore(add(mem, 35), shl(240, mload(add(mem, 0x60)))) // blocksPerSecond      (W=2)
+                mstore(add(mem, 37), shl(96, mload(add(mem, 0x80)))) // buyToken             (W=20)
+                mstore(add(mem, 57), shl(96, mload(add(mem, 0xa0)))) // sellToken            (W=20)
+                mstore(add(mem, 77), shl(96, mload(add(mem, 0xc0)))) // swapper              (W=20)
+                mstore(add(mem, 97), shl(160, mload(add(mem, 0xe0)))) // executorGasComp      (W=12)
+                mstore8(add(mem, 109), byte(31, mload(add(mem, 0x100)))) // useInternalBalances  (W=1)
+                mstore(add(mem, 110), shl(128, mload(add(mem, 0x120)))) // reportId             (W=16)
+                mstore(add(mem, 126), shl(96, mload(add(mem, 0x140)))) // matcher              (W=20)
+                mstore(add(mem, 146), shl(208, mload(add(mem, 0x160)))) // start                (W=6)
+                mstore(add(mem, 152), shl(232, mload(add(mem, 0x180)))) // fulfillmentFee       (W=3)
+                mstore(add(mem, 155), shl(96, mload(add(mem, 0x1a0)))) // feeRecipient         (W=20)
+                mstore(add(mem, 175), shl(24, mload(add(mem, 0x1c0)))) // priceTolerated       (W=29)
+                mstore(add(mem, 204), shl(232, mload(add(mem, 0x1e0)))) // toleranceRange       (W=3)
 
                 packedLen := 207
             }
