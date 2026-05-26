@@ -46,6 +46,9 @@ contract openOracleBounty is ReentrancyGuard {
     //temp holding
     mapping(address => mapping(address => uint256)) public tempHolding;
 
+    //bountyId to reportId, populated on claim when Bounties.storeReportId is true
+    mapping(uint256 => uint256) public bountyReportId;
+
     struct Bounties {
         uint256 totalAmtDeposited;
         uint256 bountyStartAmt;
@@ -59,6 +62,7 @@ contract openOracleBounty is ReentrancyGuard {
         uint16 maxRounds;
         bool claimed;
         bool recalled;
+        bool storeReportId;
     }
 
     constructor(address oracle_) {
@@ -186,6 +190,8 @@ contract openOracleBounty is ReentrancyGuard {
             tempHolding[bounty.creator][bounty.bountyToken] += amount;
             emit BountyRecalled(bountyId, o, b, amount, bounty.bountyToken, 0);
         }
+
+        if (bounty.storeReportId) bountyReportId[bountyId] = oracle.nextReportId();
 
         reportId = oracle.report{value: oracleGame.settlerReward}(o, true, true, timing);
 
