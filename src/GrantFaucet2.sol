@@ -55,7 +55,12 @@ contract BountyAndPriceRequest is ReentrancyGuard {
     uint256[6] public lastBountyId;
     uint8[6] public bountyForGame;
 
-    mapping(uint256 => IOpenOracle2.OracleGame) public committedGame;
+    mapping(uint256 => IOpenOracle2.OracleGame) internal committedGame;
+
+    function getCommittedGame(uint256 bountyId) external view returns (IOpenOracle2.OracleGame memory) {
+        return committedGame[bountyId];
+    }
+
     mapping(uint256 => IOpenOracleBounty2.Bounties) public committedBounty;
 
     event GameCreated(uint256 bountyId, uint8 gameId);
@@ -348,13 +353,11 @@ contract BountyAndPriceRequest is ReentrancyGuard {
         if (timeType != true) revert("invalid timeType");
         if (settlementTime != 4) revert("invalid settlementTime");
         if (toleranceRange > 50000) revert("slippage too wide");
-        if (swapFee != 1 || protocolFee > 250) revert("oracle game fees");
+        if (protocolFee > 500) revert("oracle game fees"); // swapFee is fixed at 0 by openSwap, no longer caller-controllable
         if (sellToken == address(0) && sellAmt > 100000000000000000) revert("selling too much ETH");
         if (sellToken == USDC && sellAmt > 300000000) revert("selling too much USDC");
 
         _updateOPPrices();
-
-        lastOpenSwapClaim = block.timestamp;
 
         // calc 0.005% of sellAmt
         uint256 sellAmtRebate = sellAmt / 20000;
@@ -365,6 +368,11 @@ contract BountyAndPriceRequest is ReentrancyGuard {
         } else {
             sellAmtRebate = sellAmtRebate * OPUSDC / 1e30;
         }
+
+        // A zero-value rebate (e.g. price not yet initialized) must not consume the cooldown.
+        if (sellAmtRebate == 0) return;
+
+        lastOpenSwapClaim = block.timestamp;
 
         IERC20(OP).safeTransfer(swapper, sellAmtRebate);
     }
